@@ -1,0 +1,14 @@
+{
+  "grid": 513,
+  "width_m": 3935.95927248795,
+  "height_m": 4030.6794315849056,
+  "zmin": -2592.529541015625,
+  "zmax": -2441.447021484375,
+  "bounds": {
+    "west": 77.385,
+    "south": 18.416,
+    "east": 77.455,
+    "north": 18.484
+  },
+  "note": "dem.bin = float32 little-endian, row-major, row 0 = north edge"
+}

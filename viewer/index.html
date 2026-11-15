@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mars Compass - 3D terrain viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #14171c; color: #e8e6e1;
+               font-family: system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #ui { position: absolute; top: 12px; left: 12px; z-index: 2; display: flex; gap: 8px;
+        flex-wrap: wrap; align-items: center; background: rgba(26,31,39,.9);
+        border: 1px solid #2c3340; border-radius: 10px; padding: 8px 10px; font-size: 13px; }
+  button { background: #20262f; color: #e8e6e1; border: 1px solid #2c3340; border-radius: 7px;
+           padding: 6px 11px; cursor: pointer; font-size: 13px; }
+  button:hover { background: #b5502f; border-color: #b5502f; }
+  label { color: #8b93a1; display: flex; align-items: center; gap: 6px; }
+  input[type=range] { width: 90px; accent-color: #d9a441; }
+  .tag { color: #e8e6e1; background: rgba(20,23,28,.8); padding: 2px 7px; border-radius: 5px;
+         font-size: 12px; white-space: nowrap; border: 1px solid #2c3340; }
+  #msg { position: absolute; bottom: 12px; left: 12px; z-index: 2; font-size: 12px; color: #8b93a1;
+         background: rgba(20,23,28,.8); padding: 5px 9px; border-radius: 6px; }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="ui">
+  <button id="btn3d">3D view</button>
+  <button id="btnTop">Top view</button>
+  <button id="btnFly">Fly along route</button>
+  <label>Height exaggeration <input id="exag" type="range" min="1" max="5" step="0.5" value="2">
+    <span id="exagVal">x2</span></label>
+</div>
+<div id="msg">Loading...</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+const msg = document.getElementById('msg');
+
+// ---------- load data ----------
+const meta = await (await fetch('./meta.json')).json();
+const N = meta.grid, W = meta.width_m, H = meta.height_m;
+const heights = new Float32Array(await (await fetch('./dem.bin')).arrayBuffer());
+if (heights.length !== N * N) { msg.textContent = 'dem.bin does not match meta.json grid size'; throw new Error('size mismatch'); }
+
+// route.json: { "points": [[east_m, north_m], ...], "waypoints": [{"name": "...", "e": 0, "n": 0}] }
+// east_m / north_m are metres measured from the SOUTH-WEST corner of the study area.
+async function loadRoute() {
+  try {
+    const r = await fetch('./route.json');
+    if (!r.ok) throw new Error('no route');
+    return await r.json();
+  } catch {
+    return {
+      demo: true,
+      points: [[W*0.15, H*0.2], [W*0.35, H*0.35], [W*0.5, H*0.55], [W*0.7, H*0.7], [W*0.85, H*0.85]],
+      waypoints: [{ name: 'Start', e: W*0.15, n: H*0.2 }, { name: 'Waypoint A', e: W*0.85, n: H*0.85 }]
+    };
+  }
+}
+const route = await loadRoute();
+
+// ---------- scene ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x14171c);
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 1, W * 10);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.setSize(innerWidth, innerHeight);
+labelRenderer.domElement.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none';
+document.body.appendChild(labelRenderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+sun.position.set(-W, W, H);
+scene.add(sun);
+
+// ---------- terrain ----------
+let exag = 2;
+const geo = new THREE.PlaneGeometry(W, H, N - 1, N - 1);
+geo.rotateX(-Math.PI / 2);                       // after this, north = -z, east = +x
+const pos = geo.attributes.position;
+function applyHeights() {
+  for (let i = 0; i < pos.count; i++) pos.setY(i, (heights[i] - meta.zmin) * exag);
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+}
+applyHeights();
+
+let tex = null;
+try {
+  tex = await new THREE.TextureLoader().loadAsync('./texture.jpg');
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+} catch { /* no texture: fall back to a flat rust colour */ }
+const terrain = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+  map: tex, color: tex ? 0xffffff : 0xa85a33, roughness: 1, metalness: 0
+}));
+scene.add(terrain);
+
+function heightAt(x, z) {                         // bilinear sample of the heightmap, world coords
+  const col = (x + W / 2) / W * (N - 1), row = (z + H / 2) / H * (N - 1);
+  const c0 = Math.max(0, Math.min(N - 2, Math.floor(col))), r0 = Math.max(0, Math.min(N - 2, Math.floor(row)));
+  const fc = Math.min(1, Math.max(0, col - c0)), fr = Math.min(1, Math.max(0, row - r0));
+  const h = (r, c) => heights[r * N + c];
+  const top = h(r0, c0) * (1 - fc) + h(r0, c0 + 1) * fc;
+  const bot = h(r0 + 1, c0) * (1 - fc) + h(r0 + 1, c0 + 1) * fc;
+  return ((top * (1 - fr) + bot * fr) - meta.zmin) * exag;
+}
+
+// ---------- route ----------
+const LIFT = Math.max(2, W / 500);
+function toWorld(e, n) { const x = e - W / 2, z = H / 2 - n; return new THREE.Vector3(x, heightAt(x, z) + LIFT, z); }
+function drape(points) {                          // subdivide so the line follows the terrain
+  const out = [], step = W / N;
+  for (let i = 0; i < points.length - 1; i++) {
+    const [e0, n0] = points[i], [e1, n1] = points[i + 1];
+    const k = Math.max(1, Math.ceil(Math.hypot(e1 - e0, n1 - n0) / step));
+    for (let j = 0; j < k; j++) { const t = j / k; out.push(toWorld(e0 + (e1 - e0) * t, n0 + (n1 - n0) * t)); }
+  }
+  const last = points[points.length - 1];
+  out.push(toWorld(last[0], last[1]));
+  return out;
+}
+
+const routeGroup = new THREE.Group();
+scene.add(routeGroup);
+let curve = null;
+function buildRoute() {
+  routeGroup.clear();
+  const pts = drape(route.points);
+  curve = new THREE.CatmullRomCurve3(pts);
+  routeGroup.add(new THREE.Mesh(
+    new THREE.TubeGeometry(curve, Math.min(3000, pts.length * 2), W / 700, 6, false),
+    new THREE.MeshBasicMaterial({ color: 0xd9a441 })));
+  for (const w of route.waypoints || []) {
+    const p = toWorld(w.e, w.n);
+    const m = new THREE.Mesh(new THREE.SphereGeometry(W / 200, 16, 12), new THREE.MeshBasicMaterial({ color: 0xb5502f }));
+    m.position.copy(p);
+    const div = document.createElement('div');
+    div.className = 'tag'; div.textContent = w.name;
+    const label = new CSS2DObject(div);
+    label.position.set(0, W / 120, 0);
+    m.add(label);
+    routeGroup.add(m);
+  }
+}
+buildRoute();
+
+// ---------- camera views ----------
+const midY = (meta.zmax - meta.zmin) * exag / 2;
+function view3d() { camera.position.set(0, W * 0.55 + midY, H * 0.8); controls.target.set(0, midY * 0.4, 0); }
+function viewTop() { camera.position.set(0, W * 1.15 + midY, 0.001); controls.target.set(0, 0, 0); }
+view3d();
+document.getElementById('btn3d').onclick = () => { flying = false; view3d(); };
+document.getElementById('btnTop').onclick = () => { flying = false; viewTop(); };
+
+// ---------- fly along route ----------
+let flying = false, flyT = 0;
+document.getElementById('btnFly').onclick = () => { flying = true; flyT = 0; };
+
+// ---------- height exaggeration ----------
+const exagInput = document.getElementById('exag'), exagVal = document.getElementById('exagVal');
+exagInput.oninput = () => {
+  exag = parseFloat(exagInput.value);
+  exagVal.textContent = 'x' + exag;
+  applyHeights(); buildRoute();
+};
+
+msg.textContent = (route.demo ? 'Demo route shown - add route.json to use your own. ' : '')
+  + (W / 1000).toFixed(1) + ' km x ' + (H / 1000).toFixed(1) + ' km, relief '
+  + Math.round(meta.zmax - meta.zmin) + ' m';
+
+// ---------- loop ----------
+function animate() {
+  requestAnimationFrame(animate);
+  if (flying && curve) {
+    flyT += 0.0015;
+    if (flyT >= 1) flying = false;
+    else {
+      const p = curve.getPointAt(flyT), ahead = curve.getPointAt(Math.min(1, flyT + 0.02));
+      camera.position.set(p.x, p.y + W * 0.05, p.z + W * 0.08);
+      controls.target.copy(ahead);
+    }
+  }
+  controls.update();
+  renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
+}
+animate();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight); labelRenderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
